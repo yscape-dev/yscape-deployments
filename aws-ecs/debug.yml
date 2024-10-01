@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: An example service that deploys in AWS VPC networking mode
+       on EC2 capacity. Service uses a capacity provider to request
+       EC2 instances to run on. Service runs with networking in private
+       subnets, but still accessible to the internet via a load balancer
+       hosted in public subnets.
+
+Parameters:
+  VpcId:
+    Type: String
+    Description: The VPC that the service is running inside of
+  YScapeAppStackName:
+    Type: String
+    Default: yscape-app
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of public subnet ID's to put the load balancer in
+  EC2AMI:
+    Description: The Amazon Machine Image ID used for the cluster
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  
+  # Create and attach an IAM policy to allow you to use EC2 Instance Connect
+  EC2InstanceConnectPolicy:
+    Type: AWS::IAM::UserPolicy
+    Properties:
+      PolicyName: EC2InstanceConnect
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - ec2-instance-connect:SendSSHPublicKey
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - ec2:DescribeInstances
+          Resource: '*'
+      UserName: jason
+
+  # Create a security group to allow inbound traffic from the EC2 Instance Connect service to your instance
+  DebuggingInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EC2 Instance Connect
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 18.237.140.160/29 # service: EC2_INSTANCE_CONNECT
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 24.128.86.229/32 # My Home IP Address
+  
+  # Allow EC2 Instance Connect to access the instance
+  YScapeVolumeMountTargetsIngressfromDebuggingInstance:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from the public ALB
+      GroupId: 
+        Fn::ImportValue: !Sub "${YScapeAppStackName}-YScapeVolumeMountTargetSecurityGroup"
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref 'DebuggingInstanceSecurityGroup'
+
+  # Create an EC2 Instance with Amazon Linux 2023 AMI
+  DebuggingInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref EC2AMI
+      InstanceType: t2.micro
+      SubnetId: !Select [0, !Ref PublicSubnetIds]
+      SecurityGroupIds:
+      - !Ref DebuggingInstanceSecurityGroup
+
+Outputs:
+  DebuggingInstance:
+    Value: !Ref DebuggingInstance
+  DebuggingInstancePublicDNS:
+    Value: !GetAtt DebuggingInstance.PublicDnsName

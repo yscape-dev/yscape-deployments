@@ -1,0 +1,441 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: An example service that deploys in AWS VPC networking mode
+       on EC2 capacity. Service uses a capacity provider to request
+       EC2 instances to run on. Service runs with networking in private
+       subnets, but still accessible to the internet via a load balancer
+       hosted in public subnets.
+
+Parameters:
+  VpcId:
+    Type: String
+    Description: The VPC that the service is running inside of
+  PrivateSubnetPrimary:
+    Type: AWS::EC2::Subnet::Id
+    Description: The primary private subnet that the yscape-app service is running in
+  PrivateSubnetSecondary:
+    Type: AWS::EC2::Subnet::Id
+    Description: An optional backup private subnet that the yscape-app service can run in
+    Default: ""
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of public subnet ID's to put the load balancer in
+  ClusterName:
+    Type: String
+    Description: The name of the ECS cluster into which to launch capacity.
+  ServiceName:
+    Type: String
+    Default: yscape-app
+    Description: A name for the service
+  DomainName:
+    Type: String
+    Default: yscape-ecs.bored-antelope.com
+    Description: The domain name that the service is running on
+  YScapeDockerCredentialsSecretArn:
+    Type: String
+    Description: The secret that contains the YScape private repository docker credentials
+  YScapeDockerImage:
+    Type: String
+    Description: The YScape private repository docker image that the service will run
+  ContainerCpu:
+    Type: Number
+    Default: 2048
+    Description: How much CPU to give the container. 1024 is 1 CPU
+  ContainerMemory:
+    Type: Number
+    Default: 2048
+    Description: How much memory in megabytes to give the container
+  ContainerPort:
+    Type: Number
+    Default: 3000
+    Description: What port that the YScape application expects traffic on
+  YScapeDockerTaskClusterName:
+    Type: String
+    Default: yscape-docker-task-cluster
+    Description: The name of the ECS cluster into which to launch Docker tasks.
+
+Conditions:
+  # Condition to check if the PrivateSubnetSecondary is set
+  isPrivateSubnetSecondaryPresent: !Not [ !Equals [ !Ref PrivateSubnetSecondary, "" ] ]
+
+Resources:
+
+
+  ## AWS Resources
+
+  # Certificate for the service
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+
+  # The EFS volume that the service will use to store app state, configuration, and  share files with tasks
+  YScapeVolume:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      FileSystemTags:
+      - Key: Name
+        Value: yscape-volume
+
+  YScapeVolumeStorageAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref YScapeVolume
+      RootDirectory:
+        CreationInfo:
+          OwnerGid: 1000
+          OwnerUid: 1000
+          Permissions: 0777
+        Path: /storage
+
+  YScapeVolumeSharedAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref YScapeVolume
+      RootDirectory:
+        CreationInfo:
+          OwnerGid: 1000
+          OwnerUid: 1000
+          Permissions: 0777
+        Path: /shared
+
+
+
+
+  # This log group stores the stdout logs from this service's containers
+  YScapeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+  # Task definition to run the YScape app container
+  YScapeAppTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref ServiceName
+      Cpu: !Ref ContainerCpu
+      Memory: !Ref ContainerMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+      - EC2
+      RuntimePlatform:
+        CpuArchitecture: x86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !Ref YScapeAppTaskExecutionRole
+      TaskRoleArn: !Ref YScapeAppTaskRole
+      ContainerDefinitions:
+      - Name: !Ref ServiceName
+        Cpu: !Ref ContainerCpu
+        Memory: !Ref ContainerMemory
+        Image: !Ref YScapeDockerImage
+        RepositoryCredentials:
+          CredentialsParameter: !Ref YScapeDockerCredentialsSecretArn
+        PortMappings:
+        - ContainerPort: !Ref ContainerPort
+          HostPort: !Ref ContainerPort
+        Environment:
+        - Name: APPLICATION_HOST
+          Value: !Ref DomainName
+        - Name: PORT
+          Value: !Ref ContainerPort
+        - Name: WEB_CONCURRENCY
+          Value: 0
+        - Name: RAILS_MAX_THREADS
+          Value: 3
+        - Name: JOB_QUEUE_CONCURRENCY
+          Value: 3
+        - Name: SECRET_KEY_BASE_HASH_INPUT
+          Value: !Ref AWS::StackId
+        - Name: AWS_DEFAULT_REGION
+          Value: !Ref AWS::Region
+        MountPoints:
+        - ContainerPath: /storage
+          SourceVolume: yscape-storage-volume
+          ReadOnly: false
+        - ContainerPath: /mnt/yscape_files
+          SourceVolume: yscape-shared-volume
+          ReadOnly: false
+        LinuxParameters:
+          InitProcessEnabled: true
+        LogConfiguration:
+          LogDriver: 'awslogs'
+          Options:
+            mode: non-blocking
+            max-buffer-size: 25m
+            awslogs-group: !Ref YScapeLogGroup
+            awslogs-region: !Ref AWS::Region
+            awslogs-stream-prefix: !Ref ServiceName
+      Volumes:
+      - Name: yscape-storage-volume
+        EFSVolumeConfiguration:
+          FilesystemId: !Ref YScapeVolume
+          AuthorizationConfig:
+            AccessPointId: !Ref YScapeVolumeStorageAccessPoint
+          TransitEncryption: ENABLED
+      - Name: yscape-shared-volume
+        EFSVolumeConfiguration:
+          FilesystemId: !Ref YScapeVolume
+          AuthorizationConfig:
+            AccessPointId: !Ref YScapeVolumeSharedAccessPoint
+          TransitEncryption: ENABLED
+
+  # ECS Service to run the YScape App
+  YScapeService:
+    Type: AWS::ECS::Service
+    # Avoid race condition between ECS service creation and associating
+    # the target group with the LB
+    DependsOn: PublicLoadBalancerListener
+    Properties:
+      ServiceName: !Ref ServiceName
+      Cluster: !Ref ClusterName
+      PlacementStrategies:
+      - Field: attribute:ecs.availability-zone
+        Type: spread
+      - Field: cpu
+        Type: binpack
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+          - !Ref YScapeServiceSecurityGroup
+          Subnets:
+          - !Ref PrivateSubnetPrimary
+          - !If [isPrivateSubnetSecondaryPresent, !Ref PrivateSubnetSecondary, Aws::NoValue]
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 0
+      DesiredCount: 1
+      TaskDefinition: !Ref YScapeAppTaskDefinition
+      LoadBalancers:
+      - ContainerName: !Ref ServiceName
+        ContainerPort: !Ref ContainerPort
+        TargetGroupArn: !Ref ServiceTargetGroup
+
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: '30'
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups:
+      - !Ref PublicLoadBalancerSecurityGroup
+  PublicLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: 'forward'
+        ForwardConfig:
+          TargetGroups:
+          - TargetGroupArn: !Ref ServiceTargetGroup
+            Weight: 100
+      LoadBalancerArn: !Ref 'PublicLoadBalancer'
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+      - CertificateArn: !Ref Certificate
+  RedirectHTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: 'redirect'
+        RedirectConfig:
+          Protocol: HTTPS
+          Port: 443
+          StatusCode: HTTP_301
+      LoadBalancerArn: !Ref 'PublicLoadBalancer'
+      Port: 80
+      Protocol: HTTP
+
+  ## IAM Permissions
+
+  # Role for the ECS agent to create containers
+  YScapeAppTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+          Condition:
+            ArnLike:
+              aws:SourceArn: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:*
+            StringEquals:
+              aws:SourceAccount: !Ref AWS::AccountId
+      Path: /
+      # This role enables all features of ECS. See reference:
+      # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/security-iam-awsmanpol.html#security-iam-awsmanpol-AmazonECSTaskExecutionRolePolicy
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadYScapeSecrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref YScapeDockerCredentialsSecretArn
+        - PolicyName: EFSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:DescribeMountTargets
+                  - elasticfilesystem:DescribeFileSystems
+                  - elasticfilesystem:DescribeAccessPoints
+                Resource: !GetAtt YScapeVolume.Arn
+
+  # Role for the YScape app task to access AWS services
+  YScapeAppTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+          Condition:
+            ArnLike:
+              aws:SourceArn: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:*
+            StringEquals:
+              aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: ManageECSTasks
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:RunTask
+                  - ecs:DescribeTasks
+                  - ecs:DescribeTaskDefinition
+                  - logs:GetLogEvents
+                  - iam:PassRole
+                Resource: '*'
+        - PolicyName: SSMPermissionsForECSExec
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'
+
+  ## Networking
+
+  # Mount targets to allow network access to the YScape EFS volume
+  YScapeVolumeMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref YScapeVolume
+      SubnetId: !Ref PrivateSubnetPrimary
+      SecurityGroups:
+      - !Ref YScapeVolumeMountTargetSecurityGroup
+
+  YScapeVolumeMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Condition: isPrivateSubnetSecondaryPresent
+    Properties:
+      FileSystemId: !Ref YScapeVolume
+      SubnetId: !Ref PrivateSubnetSecondary
+      SecurityGroups:
+      - !Ref YScapeVolumeMountTargetSecurityGroup
+
+  # Security Group for EFS mount targets
+  YScapeVolumeMountTargetSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EFS mount targets
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 2049
+        ToPort: 2049
+        SourceSecurityGroupId: !Ref YScapeServiceSecurityGroup
+
+  # Security group for ECS Service
+  YScapeServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for service
+      VpcId: !Ref VpcId
+
+  # # Open up the service's security group to traffic originating
+  # # from the security group of the load balancer.
+  ServiceIngressfromLoadBalancer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from the public ALB
+      GroupId: !Ref YScapeServiceSecurityGroup
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref 'PublicLoadBalancerSecurityGroup'
+
+
+  # Keeps track of the list of tasks for the service
+  ServiceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: /up
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: ip
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      UnhealthyThresholdCount: 10
+      VpcId: !Ref VpcId
+      TargetGroupAttributes:
+      - Key: deregistration_delay.timeout_seconds
+        Value: 0
+
+
+
+  # A public facing load balancer, this is used as ingress for
+  # public facing internet traffic.
+  PublicLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the public facing load balancer
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+      # Allow access to public facing ALB from any IP address
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: -1
+
+Outputs:
+  YScapeLogGroup:
+    Value: !Ref YScapeLogGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-YScapeLogGroup"
+  YScapeVolumeMountTargetSecurityGroup:
+    Value: !Ref YScapeVolumeMountTargetSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-YScapeVolumeMountTargetSecurityGroup"
+  YScapeVolumeArn:
+    Value: !GetAtt YScapeVolume.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-YScapeVolumeArn"
+  YScapeVolume:
+    Value: !Ref YScapeVolume
+    Export:
+      Name: !Sub "${AWS::StackName}-YScapeVolume"
+  YScapeVolumeSharedAccessPoint:
+    Value: !Ref YScapeVolumeSharedAccessPoint
+    Export:
+      Name: !Sub "${AWS::StackName}-YScapeVolumeSharedAccessPoint"
+

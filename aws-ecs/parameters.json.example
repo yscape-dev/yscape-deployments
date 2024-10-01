@@ -1,0 +1,42 @@
+[
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "<VPC ID: vpc-XXX>"
+  },
+  {
+    "ParameterKey": "PrivateSubnetPrimary",
+    "ParameterValue": "<Subnet ID: subnet-XXX>"
+  },
+  {
+    "ParameterKey": "PrivateSubnetSecondary",
+    "ParameterValue": "<(optional) 2nd Subnet ID: subnet-YYY>"
+  },
+  {
+    "ParameterKey": "PublicSubnetIds",
+    "ParameterValue": "<List of Public Subnets for Load Balancer: subnet-AAA,subnet-BBB>"
+  },
+  {
+    "ParameterKey": "ClusterName",
+    "ParameterValue": "<ECS Cluster Name>"
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "<Domain Name for your YScape Instance: yscape.yourcompany.com>"
+  },
+  {
+    "ParameterKey": "YScapeDockerCredentialsSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:<region>:<account id>:secret:<name of secret>"
+  },
+  {
+    "ParameterKey": "YScapeDockerImage",
+    "ParameterValue": "registry.yscape.dev/yscape/app:alpha"
+  },
+  {
+    "ParameterKey": "ContainerCpu",
+    "ParameterValue": "1024"
+  },
+  {
+    "ParameterKey": "ContainerMemory",
+    "ParameterValue": "512"
+  }
+]

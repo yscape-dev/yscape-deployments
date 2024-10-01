@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: An example service that deploys in AWS VPC networking mode
+       on EC2 capacity. Service uses a capacity provider to request
+       EC2 instances to run on. Service runs with networking in private
+       subnets, but still accessible to the internet via a load balancer
+       hosted in public subnets.
+
+Parameters:
+  YScapeAppStackName:
+    Type: String
+    Default: yscape-app
+  TaskDockerImage:
+    Type: String
+    Description: The YScape private repository docker image that the service will run
+    Default: alpine:3.19
+  ContainerCpu:
+    Type: Number
+    Default: 1024
+    Description: How much CPU to give the container. 1024 is 1 CPU
+  ContainerMemory:
+    Type: Number
+    Default: 2048
+    Description: How much memory in megabytes to give the container
+  YScapeDockerTaskClusterName:
+    Type: String
+    Default: yscape-docker-task-cluster
+    Description: The name of the ECS cluster into which to launch Docker tasks.
+
+Resources:
+ 
+  # Create a new ECS cluster for the YScape ECS Tasks to run in if you are not using an existing cluster
+  YScapeECSTasksCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref YScapeDockerTaskClusterName
+      CapacityProviders:
+        - FARGATE
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+
+
+  YScapeTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+          Condition:
+            ArnLike:
+              aws:SourceArn: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:*
+            StringEquals:
+              aws:SourceAccount: !Ref AWS::AccountId
+      Path: /
+      # This role enables all features of ECS. See reference:
+      # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/security-iam-awsmanpol.html#security-iam-awsmanpol-AmazonECSTaskExecutionRolePolicy
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: EFSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:DescribeMountTargets
+                  - elasticfilesystem:DescribeFileSystems
+                  - elasticfilesystem:DescribeAccessPoints
+                Resource: 
+                  Fn::ImportValue: !Sub "${YScapeAppStackName}-YScapeVolumeArn"
+        - PolicyName: SSMPermissionsForECSExec
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'
+        # Add your custom policies here 
+
+  # Example of a task definition for the alpine:3.19 image
+  Alpine319TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: yscape-docker-task
+      Cpu: !Ref ContainerCpu
+      Memory: !Ref ContainerMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+      - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: x86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !Ref YScapeTaskExecutionRole
+      ContainerDefinitions:
+      - Name: task-container
+        Cpu: !Ref ContainerCpu
+        Memory: !Ref ContainerMemory
+        Image: !Ref TaskDockerImage
+        LinuxParameters:
+          InitProcessEnabled: true
+        MountPoints:
+        - ContainerPath: /mnt/yscape_files
+          SourceVolume: yscape-shared-volume
+          ReadOnly: false
+        LogConfiguration:
+          LogDriver: 'awslogs'
+          Options:
+            mode: non-blocking
+            max-buffer-size: 25m
+            awslogs-group: 
+               Fn::ImportValue: !Sub "${YScapeAppStackName}-YScapeLogGroup"
+            awslogs-region: !Ref AWS::Region
+            awslogs-stream-prefix: yscape-ecs-tasks 
+      Volumes:
+      - Name: yscape-shared-volume
+        EFSVolumeConfiguration:
+          FilesystemId: 
+            Fn::ImportValue: !Sub "${YScapeAppStackName}-YScapeVolume"
+          AuthorizationConfig:
+            AccessPointId:
+              Fn::ImportValue: !Sub "${YScapeAppStackName}-YScapeVolumeSharedAccessPoint"
+          TransitEncryption: ENABLED
