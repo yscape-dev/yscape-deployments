@@ -29,7 +29,7 @@
   },
   {
     "ParameterKey": "YScapeDockerImage",
-    "ParameterValue": "registry.yscape.dev/yscape/app:alpha"
+    "ParameterValue": "registry.yscape.dev/yscape/app:latest"
   },
   {
     "ParameterKey": "ContainerCpu",

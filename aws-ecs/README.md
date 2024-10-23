@@ -33,7 +33,7 @@ And then update the parameters.json file with the following values:
 * `ServiceName`: The name of the ECS Service (Default: yscape-app)
 * `DomainName`: The domain name pointing to the ECS Service (e.g. yscape.yourcompany.com)
 * `YScapeDockerCredentialsSecretArn`: The ARN of the secret containing the docker credentials created in the Prerequisites step
-* `YScapeDockerImage`: The URL of the YScape Docker image (e.g. registry.yscape.dev/yscape/app:alpha)
+* `YScapeDockerImage`: The URL of the YScape Docker image (e.g. registry.yscape.dev/yscape/app:latest)
 * `ContainerCpu`: The CPU limit of the container (Default: 2048)
 * `ContainerMemory`: The memory limit of the container (Default: 2048)
 
