@@ -47,7 +47,7 @@ Parameters:
     Description: How much memory in megabytes to give the container
   ContainerPort:
     Type: Number
-    Default: 3000
+    Default: 80
     Description: What port that the YScape application expects traffic on
   YScapeDockerTaskClusterName:
     Type: String
